@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/lib/supabase';
-import { Code2, GraduationCap, Users, Trophy, AlertCircle } from 'lucide-react';
+import { Code2, GraduationCap,Lightbulb,
+Brain, Users, Trophy, AlertCircle } from 'lucide-react';
 import type { Role } from '@/types';
 
 interface AuthModalProps {

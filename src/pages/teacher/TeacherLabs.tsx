@@ -35,46 +35,171 @@ export function TeacherLabs() {
   }, [profile]);
 
   const refresh = async () => {
-    if (!profile) return;
-    const { data } = await supabase
-      .from('labs')
-      .select('*, subject(*), batch(*), topics(*)')
-      .or(`teacher_id.eq.${profile.id},teacher_id.is.null`)
-      .order('created_at', { ascending: false });
-    setLabs(data as any || []);
-  };
+  if (!profile) return;
 
-  const saveLab = async () => {
-    if (!profile) return;
-    setSaving(true);
-    if (editingLab) {
-      await supabase.from('labs').update({
-        name: labForm.name, description: labForm.description,
-        subject_id: labForm.subject_id, batch_id: labForm.batch_id || null,
-      }).eq('id', editingLab.id);
-    } else {
-      await supabase.from('labs').insert({
-        name: labForm.name, description: labForm.description,
-        subject_id: labForm.subject_id, batch_id: labForm.batch_id || null,
+  // Load labs first
+  const { data: labData, error: labError } = await supabase
+    .from('labs')
+    .select('*')
+    .eq('teacher_id', profile.id)
+    .order('created_at', { ascending: false });
+
+  if (labError) {
+    console.error('LAB LOAD ERROR:', labError);
+    alert(`Could not load labs:\n${labError.message}`);
+    return;
+  }
+
+  if (!labData || labData.length === 0) {
+    setLabs([]);
+    return;
+  }
+
+  // Load subjects
+  const subjectIds = [...new Set(labData.map((lab) => lab.subject_id))];
+
+  const { data: subjectData, error: subjectError } = await supabase
+    .from('subjects')
+    .select('*')
+    .in('id', subjectIds);
+
+  if (subjectError) {
+    console.error('SUBJECT LOAD ERROR:', subjectError);
+  }
+
+  // Load batches
+  const batchIds = [
+    ...new Set(
+      labData
+        .map((lab) => lab.batch_id)
+        .filter(Boolean)
+    ),
+  ];
+
+  const { data: batchData, error: batchError } = await supabase
+    .from('batches')
+    .select('*')
+    .in('id', batchIds);
+
+  if (batchError) {
+    console.error('BATCH LOAD ERROR:', batchError);
+  }
+
+  // Load topics
+  const labIds = labData.map((lab) => lab.id);
+
+  const { data: topicData, error: topicError } = await supabase
+    .from('topics')
+    .select('*')
+    .in('lab_id', labIds)
+    .order('sort_order');
+
+  if (topicError) {
+    console.error('TOPIC LOAD ERROR:', topicError);
+  }
+
+  // Combine everything for the UI
+  const combinedLabs = labData.map((lab) => ({
+    ...lab,
+    subject: subjectData?.find((subject) => subject.id === lab.subject_id),
+    batch: batchData?.find((batch) => batch.id === lab.batch_id),
+    topics: topicData?.filter((topic) => topic.lab_id === lab.id) || [],
+  }));
+
+  console.log('LABS LOADED:', combinedLabs);
+
+  setLabs(combinedLabs as any);
+};
+
+ const saveLab = async () => {
+  if (!profile) return;
+
+  setSaving(true);
+
+  let error = null;
+
+  if (editingLab) {
+    const result = await supabase
+      .from('labs')
+      .update({
+        name: labForm.name,
+        description: labForm.description,
+        subject_id: labForm.subject_id,
+        batch_id: labForm.batch_id || null,
+      })
+      .eq('id', editingLab.id);
+
+    error = result.error;
+  } else {
+    const result = await supabase
+      .from('labs')
+      .insert({
+        name: labForm.name,
+        description: labForm.description,
+        subject_id: labForm.subject_id,
+        batch_id: labForm.batch_id || null,
         teacher_id: profile.id,
       });
-    }
-    setSaving(false);
-    setShowLabModal(false);
-    setEditingLab(null);
-    setLabForm({ name: '', description: '', subject_id: '', batch_id: '' });
-    await refresh();
-  };
 
-  const saveSubject = async () => {
-    setSaving(true);
-    await supabase.from('subjects').insert(subjectForm);
+    error = result.error;
+  }
+
+  if (error) {
+    alert(`Lab creation failed:\n${error.message}`);
     setSaving(false);
-    setShowSubjectModal(false);
-    setSubjectForm({ name: '', code: '', description: '' });
-    const { data: subs } = await supabase.from('subjects').select('*').order('name');
-    setSubjects(subs as Subject[] || []);
-  };
+    return;
+  }
+
+  setSaving(false);
+  setShowLabModal(false);
+  setEditingLab(null);
+
+  setLabForm({
+    name: '',
+    description: '',
+    subject_id: '',
+    batch_id: '',
+  });
+
+  await refresh();
+};
+
+ const saveSubject = async () => {
+  if (!profile) return;
+
+  setSaving(true);
+
+  const { error } = await supabase
+    .from('subjects')
+    .insert({
+      name: subjectForm.name,
+      code: subjectForm.code,
+      description: subjectForm.description || null,
+      created_by: profile.id,
+    });
+
+  if (error) {
+    alert(`Subject creation failed:\n${error.message}`);
+    setSaving(false);
+    return;
+  }
+
+  setSaving(false);
+  setShowSubjectModal(false);
+  setSubjectForm({ name: '', code: '', description: '' });
+
+  const { data: subs, error: fetchError } = await supabase
+    .from('subjects')
+    .select('*')
+    .order('name');
+
+  if (fetchError) {
+    alert(`Could not load subjects:\n${fetchError.message}`);
+    return;
+  }
+
+  setSubjects(subs as Subject[] || []);
+};
 
   const saveTopic = async () => {
     if (!showTopicModal) return;

@@ -1,8 +1,16 @@
 export type Role = 'student' | 'teacher' | 'admin';
 
-export type ProgramStatus = 'not_started' | 'attempted' | 'passed' | 'completed';
+export type ProgramStatus =
+  | 'not_started'
+  | 'attempted'
+  | 'passed'
+  | 'completed';
 
-export type QuestionType = 'mcq' | 'output' | 'debug' | 'concept';
+export type QuestionType =
+  | 'mcq'
+  | 'output'
+  | 'debug'
+  | 'concept';
 
 export interface Profile {
   id: string;
@@ -79,11 +87,16 @@ export interface Submission {
   output: string;
   explanation: string;
   status: ProgramStatus;
+
+  // Automatic score calculated from test cases
+  score?: number;
+
   feedback: string | null;
   verified_by: string | null;
   verified_at: string | null;
   submitted_at: string;
   created_at: string;
+
   program?: Program;
   student?: Profile;
 }

@@ -1,267 +1,563 @@
 import { useEffect, useState } from 'react';
+import {
+  Users,
+  AlertTriangle,
+  TrendingUp,
+  MessageSquare,
+  X,
+} from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
-import { Card, Badge } from '@/components/ui/Card';
-import { Modal } from '@/components/ui/Modal';
-import { EmptyState, Spinner } from '@/components/ui/EmptyState';
-import { ActivityCalendar } from '@/components/charts/ActivityCalendar';
-import { calculateStreak, statusColor, statusLabel, timeAgo } from '@/lib/utils';
-import { Users, Search, GraduationCap, Flame, Target, Brain, BookOpen } from 'lucide-react';
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line
-} from 'recharts';
-import type { Profile, Submission, QuizAttempt, ActivityLog } from '@/types';
+import { Card } from '@/components/ui/Card';
+
+interface StudentPerformance {
+  id: string;
+  name: string;
+  email: string;
+  submissions: number;
+  average: number;
+  passed: number;
+}
 
 export function TeacherStudents() {
   const { profile } = useAuth();
+
+  const [students, setStudents] = useState<StudentPerformance[]>([]);
   const [loading, setLoading] = useState(true);
-  const [students, setStudents] = useState<Profile[]>([]);
-  const [search, setSearch] = useState('');
-  const [batchFilter, setBatchFilter] = useState('all');
-  const [batches, setBatches] = useState<any[]>([]);
-  const [selectedStudent, setSelectedStudent] = useState<Profile | null>(null);
-  const [studentData, setStudentData] = useState<{
-    submissions: Submission[];
-    quizAttempts: QuizAttempt[];
-    activity: ActivityLog[];
-    notebookCount: number;
-  } | null>(null);
-  const [loadingDetail, setLoadingDetail] = useState(false);
+
+  const [selectedStudent, setSelectedStudent] =
+    useState<StudentPerformance | null>(null);
+
+  const [interventionNote, setInterventionNote] = useState('');
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (!profile) return;
-    (async () => {
-      const { data: labs } = await supabase.from('labs').select('batch_id').or(`teacher_id.eq.${profile.id},teacher_id.is.null`);
-      const batchIds = (labs || []).map((l: any) => l.batch_id).filter(Boolean);
-      const { data: bats } = await supabase.from('batches').select('*').in('id', batchIds.length > 0 ? batchIds : ['00000000-0000-0000-0000-000000000000']);
-      setBatches(bats || []);
-
-      const { data } = await supabase.from('profiles').select('*, batch(name)').eq('role', 'student').order('full_name');
-      setStudents(data as any || []);
-      setLoading(false);
-    })();
+    if (profile) {
+      loadStudents();
+    }
   }, [profile]);
 
-  const openStudent = async (student: Profile) => {
-    setSelectedStudent(student);
-    setLoadingDetail(true);
-    const { data: subs } = await supabase.from('submissions').select('*, program(title, topic(name))').eq('student_id', student.id).order('submitted_at', { ascending: false });
-    const { data: quizzes } = await supabase.from('quiz_attempts').select('*, quiz(title)').eq('student_id', student.id).order('attempted_at', { ascending: false });
-    const { data: acts } = await supabase.from('activity_log').select('*').eq('user_id', student.id).order('activity_date');
-    const { count } = await supabase.from('notebook_entries').select('*', { count: 'exact', head: true }).eq('student_id', student.id);
-    setStudentData({
-      submissions: subs as Submission[] || [],
-      quizAttempts: quizzes as QuizAttempt[] || [],
-      activity: acts as ActivityLog[] || [],
-      notebookCount: count || 0,
-    });
-    setLoadingDetail(false);
+  const loadStudents = async () => {
+    if (!profile) return;
+
+    setLoading(true);
+
+    try {
+      // 1. Get teacher's labs
+      const { data: labs, error: labsError } = await supabase
+        .from('labs')
+        .select('id')
+        .or(`teacher_id.eq.${profile.id},teacher_id.is.null`);
+
+      if (labsError) throw labsError;
+
+      const labIds = (labs || []).map((lab) => lab.id);
+
+      if (labIds.length === 0) {
+        setStudents([]);
+        return;
+      }
+
+      // 2. Get topics
+      const { data: topics, error: topicsError } = await supabase
+        .from('topics')
+        .select('id, lab_id')
+        .in('lab_id', labIds);
+
+      if (topicsError) throw topicsError;
+
+      const topicIds = (topics || []).map((topic) => topic.id);
+
+      if (topicIds.length === 0) {
+        setStudents([]);
+        return;
+      }
+
+      // 3. Get programs
+      const { data: programs, error: programsError } = await supabase
+        .from('programs')
+        .select('id, marks')
+        .in('topic_id', topicIds);
+
+      if (programsError) throw programsError;
+
+      const programIds = (programs || []).map((program) => program.id);
+
+      if (programIds.length === 0) {
+        setStudents([]);
+        return;
+      }
+
+      // 4. Get submissions
+      const { data: submissions, error: submissionsError } =
+        await supabase
+          .from('submissions')
+          .select(
+            'student_id, program_id, score, status'
+          )
+          .in('program_id', programIds);
+
+      if (submissionsError) throw submissionsError;
+
+      // 5. Get student profiles
+      const studentIds = [
+        ...new Set(
+          (submissions || []).map(
+            (submission) => submission.student_id
+          )
+        ),
+      ];
+
+      if (studentIds.length === 0) {
+        setStudents([]);
+        return;
+      }
+
+      const { data: profiles, error: profilesError } =
+        await supabase
+          .from('profiles')
+          .select('id, full_name, email')
+          .in('id', studentIds);
+
+      if (profilesError) throw profilesError;
+
+      // 6. Create performance map
+      const performanceMap = new Map<
+        string,
+        {
+          submissions: number;
+          totalPercentage: number;
+          passed: number;
+        }
+      >();
+
+      (submissions || []).forEach((submission) => {
+        const program = (programs || []).find(
+          (p) => p.id === submission.program_id
+        );
+
+        if (!program) return;
+
+        const marks = Number(program.marks || 0);
+        const score = Number(submission.score || 0);
+
+        const percentage =
+          marks > 0 ? (score / marks) * 100 : 0;
+
+        const existing = performanceMap.get(
+          submission.student_id
+        ) || {
+          submissions: 0,
+          totalPercentage: 0,
+          passed: 0,
+        };
+
+        existing.submissions += 1;
+        existing.totalPercentage += percentage;
+
+        if (
+          submission.status === 'passed' ||
+          percentage >= 50
+        ) {
+          existing.passed += 1;
+        }
+
+        performanceMap.set(
+          submission.student_id,
+          existing
+        );
+      });
+
+      // 7. Build student list
+      const result: StudentPerformance[] = (
+        profiles || []
+      ).map((student) => {
+        const performance = performanceMap.get(student.id);
+
+        const submissionsCount =
+          performance?.submissions || 0;
+
+        return {
+          id: student.id,
+          name: student.full_name || 'Unknown Student',
+          email: student.email || '',
+          submissions: submissionsCount,
+          average:
+            submissionsCount > 0
+              ? Math.round(
+                  performance!.totalPercentage /
+                    submissionsCount
+                )
+              : 0,
+          passed: performance?.passed || 0,
+        };
+      });
+
+      // Lowest-performing students first
+      result.sort((a, b) => a.average - b.average);
+
+      setStudents(result);
+    } catch (error) {
+      console.error('Failed to load students:', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  if (loading) return <Spinner className="py-20" />;
-  if (!profile) return null;
+  const openIntervention = (
+    student: StudentPerformance
+  ) => {
+    setSelectedStudent(student);
 
-  const filtered = students.filter(s => {
-    if (search && !s.full_name.toLowerCase().includes(search.toLowerCase()) && !(s.roll_number || '').toLowerCase().includes(search.toLowerCase())) return false;
-    if (batchFilter !== 'all' && s.batch_id !== batchFilter) return false;
-    return true;
-  });
+    setInterventionNote(
+      `Hi ${student.name},\n\nI noticed that you may need some additional help with your lab work. Please review your recent submissions and reach out if you need assistance.\n\nKeep practicing!`
+    );
+  };
 
-  const activityMap: Record<string, number> = {};
-  if (studentData) {
-    studentData.activity.forEach(a => { activityMap[a.activity_date] = (activityMap[a.activity_date] || 0) + 1; });
-  }
-  const { current, longest } = studentData ? calculateStreak(studentData.activity.map(a => a.activity_date)) : { current: 0, longest: 0 };
-  const completed = studentData?.submissions.filter(s => s.status === 'completed').length || 0;
-  const pending = studentData?.submissions.filter(s => s.status === 'attempted').length || 0;
-  const totalPrograms = studentData?.submissions.length || 1;
-  const completionRate = Math.round((completed / totalPrograms) * 100);
-  const avgQuiz = studentData && studentData.quizAttempts.length > 0
-    ? Math.round(studentData.quizAttempts.reduce((s, q) => s + Number(q.percentage), 0) / studentData.quizAttempts.length)
-    : 0;
+  const sendIntervention = async () => {
+    if (!profile || !selectedStudent) return;
 
-  // Topic-wise data
-  const topicMap: Record<string, { name: string; completed: number; total: number }> = {};
-  studentData?.submissions.forEach(s => {
-    const topicName = (s as any).program?.topic?.name || 'Unknown';
-    if (!topicMap[topicName]) topicMap[topicName] = { name: topicName, completed: 0, total: 0 };
-    topicMap[topicName].total++;
-    if (s.status === 'completed') topicMap[topicName].completed++;
-  });
-  const topicData = Object.values(topicMap).map(t => ({ ...t, pct: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0 }));
+    if (!interventionNote.trim()) {
+      alert('Please enter an intervention message.');
+      return;
+    }
 
-  const quizData = studentData?.quizAttempts.map((q, i) => ({ attempt: `Q${i + 1}`, score: Number(q.percentage) })) || [];
+    setSaving(true);
 
-  // Attendance eligibility
-  const twoWeeksAgo = new Date();
-  twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
-  const recentActivity = studentData?.activity.filter(a => new Date(a.activity_date) >= twoWeeksAgo).length || 0;
-  const attendanceEligible = recentActivity >= 6;
+    try {
+      // Store the intervention as a help request/activity.
+      const { error } = await supabase
+        .from('activity_log')
+        .insert({
+          user_id: selectedStudent.id,
+          activity_type: 'teacher_intervention',
+          description: interventionNote.trim(),
+          metadata: {
+            teacher_id: profile.id,
+            teacher_name: profile.full_name,
+            student_id: selectedStudent.id,
+            student_name: selectedStudent.name,
+            average_score: selectedStudent.average,
+          },
+        });
+
+      if (error) throw error;
+
+      alert(
+        `Intervention sent to ${selectedStudent.name}.`
+      );
+
+      setSelectedStudent(null);
+      setInterventionNote('');
+    } catch (error) {
+      console.error(
+        'Failed to save intervention:',
+        error
+      );
+
+      alert(
+        error instanceof Error
+          ? error.message
+          : 'Failed to send intervention.'
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const totalStudents = students.length;
+
+  const atRisk = students.filter(
+    (student) => student.average < 50
+  ).length;
+
+  const performingWell = students.filter(
+    (student) => student.average >= 75
+  ).length;
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-gray-900">Students</h2>
-        <p className="mt-1 text-gray-500">Click any student to view their detailed progress profile.</p>
+        <h1 className="text-2xl font-bold text-gray-900">
+          Students
+        </h1>
+
+        <p className="mt-1 text-gray-500">
+          Monitor student performance and intervene when
+          students need help.
+        </p>
       </div>
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-          <input className="input pl-10" placeholder="Search by name or roll number..." value={search} onChange={(e) => setSearch(e.target.value)} />
-        </div>
-        <select className="input sm:w-48" value={batchFilter} onChange={(e) => setBatchFilter(e.target.value)}>
-          <option value="all">All Batches</option>
-          {batches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-        </select>
+      {/* Summary cards */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <Card>
+          <div className="flex items-center gap-4">
+            <div className="rounded-xl bg-blue-100 p-3">
+              <Users className="h-6 w-6 text-blue-600" />
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-500">
+                Students
+              </p>
+
+              <p className="text-2xl font-bold text-gray-900">
+                {totalStudents}
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-center gap-4">
+            <div className="rounded-xl bg-red-100 p-3">
+              <AlertTriangle className="h-6 w-6 text-red-600" />
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-500">
+                At Risk
+              </p>
+
+              <p className="text-2xl font-bold text-gray-900">
+                {atRisk}
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-center gap-4">
+            <div className="rounded-xl bg-green-100 p-3">
+              <TrendingUp className="h-6 w-6 text-green-600" />
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-500">
+                Performing Well
+              </p>
+
+              <p className="text-2xl font-bold text-gray-900">
+                {performingWell}
+              </p>
+            </div>
+          </div>
+        </Card>
       </div>
 
-      {filtered.length === 0 ? (
-        <EmptyState icon={<Users className="h-6 w-6" />} title="No students found" description="Students will appear here once they sign up." />
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {filtered.map((s) => (
-            <Card key={s.id} className="p-4" hover onClick={() => openStudent(s)}>
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-primary-500 to-accent-500 text-sm font-semibold text-white">
-                  {s.full_name?.charAt(0).toUpperCase()}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-gray-900">{s.full_name}</p>
-                  <p className="text-xs text-gray-500">{s.roll_number || 'No roll'} · {(s as any).batch?.name || 'No batch'}</p>
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
+      {/* Student list */}
+      <Card>
+        <div className="mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">
+            Student Performance
+          </h2>
 
-      {/* Student detail modal */}
-      <Modal open={!!selectedStudent} onClose={() => { setSelectedStudent(null); setStudentData(null); }} title="Student Profile" size="xl">
-        {selectedStudent && (
-          loadingDetail ? <Spinner className="py-12" /> : (
-            <div className="space-y-4">
-              {/* Header */}
-              <div className="flex items-center gap-4 rounded-lg bg-gray-50 p-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-primary-500 to-accent-500 text-lg font-bold text-white">
-                  {selectedStudent.full_name?.charAt(0).toUpperCase()}
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">{selectedStudent.full_name}</h3>
-                  <p className="text-sm text-gray-500">{selectedStudent.email} · {selectedStudent.roll_number || 'No roll'}</p>
-                </div>
-                <div className="ml-auto">
-                  <div className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${attendanceEligible ? 'bg-success-50 text-success-700' : 'bg-warning-50 text-warning-700'}`}>
-                    Attendance: {attendanceEligible ? 'Eligible' : 'At Risk'}
+          <p className="text-sm text-gray-500">
+            Students with lower scores appear first.
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="py-10 text-center text-gray-500">
+            Loading students...
+          </div>
+        ) : students.length === 0 ? (
+          <div className="py-10 text-center text-gray-500">
+            No student submission data available yet.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {students.map((student) => {
+              const needsAttention =
+                student.average < 50;
+
+              return (
+                <div
+                  key={student.id}
+                  className="flex flex-col gap-4 rounded-xl border border-gray-200 p-4 transition hover:bg-gray-50 md:flex-row md:items-center md:justify-between"
+                >
+                  {/* Student info */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-full bg-indigo-100 font-semibold text-indigo-700">
+                      {student.name
+                        .charAt(0)
+                        .toUpperCase()}
+                    </div>
+
+                    <div>
+                      <p className="font-semibold text-gray-900">
+                        {student.name}
+                      </p>
+
+                      <p className="text-sm text-gray-500">
+                        {student.email}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Stats */}
+                  <div className="flex flex-wrap items-center gap-6">
+                    <div>
+                      <p className="text-xs text-gray-500">
+                        Submissions
+                      </p>
+
+                      <p className="font-semibold">
+                        {student.submissions}
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-xs text-gray-500">
+                        Average
+                      </p>
+
+                      <p
+                        className={`font-semibold ${
+                          student.average < 50
+                            ? 'text-red-600'
+                            : student.average >= 75
+                            ? 'text-green-600'
+                            : 'text-yellow-600'
+                        }`}
+                      >
+                        {student.average}%
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-xs text-gray-500">
+                        Passed
+                      </p>
+
+                      <p className="font-semibold">
+                        {student.passed}
+                      </p>
+                    </div>
+
+                    {/* Status */}
+                    <div>
+                      {needsAttention ? (
+                        <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-700">
+                          Needs Attention
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">
+                          On Track
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Intervene */}
+                    <button
+                      onClick={() =>
+                        openIntervention(student)
+                      }
+                      className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-700"
+                    >
+                      <MessageSquare className="h-4 w-4" />
+                      Intervene
+                    </button>
                   </div>
                 </div>
-              </div>
-
-              {/* Stats */}
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <Card className="p-3 text-center">
-                  <Target className="mx-auto h-5 w-5 text-primary-600" />
-                  <p className="mt-1 text-xl font-bold text-gray-900">{completionRate}%</p>
-                  <p className="text-xs text-gray-500">Completion</p>
-                </Card>
-                <Card className="p-3 text-center">
-                  <Flame className="mx-auto h-5 w-5 text-orange-500" />
-                  <p className="mt-1 text-xl font-bold text-gray-900">{current}</p>
-                  <p className="text-xs text-gray-500">Current Streak</p>
-                </Card>
-                <Card className="p-3 text-center">
-                  <Brain className="mx-auto h-5 w-5 text-accent-600" />
-                  <p className="mt-1 text-xl font-bold text-gray-900">{avgQuiz}%</p>
-                  <p className="text-xs text-gray-500">Quiz Avg</p>
-                </Card>
-                <Card className="p-3 text-center">
-                  <BookOpen className="mx-auto h-5 w-5 text-success-600" />
-                  <p className="mt-1 text-xl font-bold text-gray-900">{studentData?.notebookCount || 0}</p>
-                  <p className="text-xs text-gray-500">Notebook Entries</p>
-                </Card>
-              </div>
-
-              {/* Activity calendar */}
-              <Card className="p-4">
-                <p className="text-sm font-semibold text-gray-900">Activity Calendar (Longest: {longest} days)</p>
-                <div className="mt-3">
-                  <ActivityCalendar activityMap={activityMap} />
-                </div>
-              </Card>
-
-              {/* Charts */}
-              <div className="grid gap-4 lg:grid-cols-2">
-                <Card className="p-4">
-                  <p className="text-sm font-semibold text-gray-900">Topic-wise Progress</p>
-                  {topicData.length > 0 ? (
-                    <ResponsiveContainer width="100%" height={200}>
-                      <BarChart data={topicData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                        <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} angle={-20} textAnchor="end" height={50} />
-                        <YAxis tick={{ fontSize: 11, fill: '#6b7280' }} axisLine={false} tickLine={false} />
-                        <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e5e7eb', fontSize: '12px' }} />
-                        <Bar dataKey="pct" fill="#2563eb" radius={[4, 4, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : <p className="py-8 text-center text-sm text-gray-400">No data</p>}
-                </Card>
-                <Card className="p-4">
-                  <p className="text-sm font-semibold text-gray-900">Quiz Score Trend</p>
-                  {quizData.length > 0 ? (
-                    <ResponsiveContainer width="100%" height={200}>
-                      <LineChart data={quizData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                        <XAxis dataKey="attempt" tick={{ fontSize: 11, fill: '#6b7280' }} axisLine={false} tickLine={false} />
-                        <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#6b7280' }} axisLine={false} tickLine={false} />
-                        <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e5e7eb', fontSize: '12px' }} />
-                        <Line type="monotone" dataKey="score" stroke="#06b6d4" strokeWidth={2} dot={{ r: 4 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  ) : <p className="py-8 text-center text-sm text-gray-400">No quiz attempts</p>}
-                </Card>
-              </div>
-
-              {/* Submission history */}
-              <Card className="p-4">
-                <p className="text-sm font-semibold text-gray-900">Submission History</p>
-                <div className="mt-2 max-h-48 overflow-y-auto space-y-2">
-                  {studentData?.submissions.length === 0 ? (
-                    <p className="py-4 text-center text-sm text-gray-400">No submissions</p>
-                  ) : (
-                    studentData?.submissions.slice(0, 10).map(s => (
-                      <div key={s.id} className="flex items-center justify-between rounded-lg border border-gray-100 p-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium text-gray-900">{(s as any).program?.title}</p>
-                          <p className="text-xs text-gray-400">{timeAgo(s.submitted_at)}</p>
-                        </div>
-                        <Badge className={statusColor(s.status)}>{statusLabel(s.status)}</Badge>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </Card>
-
-              {/* Recent activity */}
-              <Card className="p-4">
-                <p className="text-sm font-semibold text-gray-900">Recent Activity</p>
-                <div className="mt-2 max-h-40 overflow-y-auto space-y-1">
-                  {studentData?.activity.length === 0 ? (
-                    <p className="py-4 text-center text-sm text-gray-400">No activity</p>
-                  ) : (
-                    studentData?.activity.slice(-10).reverse().map(a => (
-                      <div key={a.id} className="flex items-center gap-2 text-sm text-gray-600">
-                        <span className="h-1.5 w-1.5 rounded-full bg-primary-500" />
-                        {a.description || a.activity_type} <span className="text-gray-400 ml-auto">{a.activity_date}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </Card>
-            </div>
-          )
+              );
+            })}
+          </div>
         )}
-      </Modal>
+      </Card>
+
+      {/* Intervention modal */}
+      {selectedStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl">
+            {/* Modal header */}
+            <div className="flex items-center justify-between border-b p-5">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Intervene with Student
+                </h2>
+
+                <p className="text-sm text-gray-500">
+                  {selectedStudent.name}
+                </p>
+              </div>
+
+              <button
+                onClick={() =>
+                  setSelectedStudent(null)
+                }
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Student summary */}
+            <div className="grid grid-cols-2 gap-3 p-5">
+              <div className="rounded-xl bg-gray-50 p-3">
+                <p className="text-xs text-gray-500">
+                  Average Score
+                </p>
+
+                <p className="text-xl font-bold text-gray-900">
+                  {selectedStudent.average}%
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-gray-50 p-3">
+                <p className="text-xs text-gray-500">
+                  Submissions
+                </p>
+
+                <p className="text-xl font-bold text-gray-900">
+                  {selectedStudent.submissions}
+                </p>
+              </div>
+            </div>
+
+            {/* Message */}
+            <div className="px-5 pb-5">
+              <label className="mb-2 block text-sm font-medium text-gray-700">
+                Intervention Message
+              </label>
+
+              <textarea
+                value={interventionNote}
+                onChange={(e) =>
+                  setInterventionNote(e.target.value)
+                }
+                rows={7}
+                className="w-full rounded-xl border border-gray-300 p-3 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                placeholder="Write a message for the student..."
+              />
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end gap-3 border-t p-5">
+              <button
+                onClick={() => {
+                  setSelectedStudent(null);
+                  setInterventionNote('');
+                }}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={sendIntervention}
+                disabled={saving}
+                className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {saving
+                  ? 'Sending...'
+                  : 'Send Intervention'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
